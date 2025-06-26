@@ -361,4 +361,71 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# --- Visual Studio и .NET ---
+# (оставлено из вашего шаблона)
+
+# --- Python ---
+# Виртуальное окружение
+venv/
+.venv/
+ENV/
+env/
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyc
+*.pyo
+*.pyd
+*.pycache/
+# Базы данных
+*.db
+*.sqlite3
+# Временные файлы и папки
+tmp/
+temp/
+*.log
+*.pid
+# Файлы настроек и переменных окружения
+.env
+.env.*
+# Файлы зависимостей pip
+pip-log.txt
+pip-delete-this-directory.txt
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+# Файлы управления ботом
+bot.pid
+
+# --- Проект Bot_GPT ---
 /Bot_GPT/.env
+/Bot_GPT/tmp/
+history.db
+# Если база данных может называться иначе:
+*.db
+
+# --- IDE и редакторы ---
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Git ---
+.git/
+.gitignore
+
+# --- Прочее ---
+# Логи и отчёты
+*.log
+*.out
+*.err
+
+# --- Исключения ---
+# Если нужно оставить пример .env
+!.env.example

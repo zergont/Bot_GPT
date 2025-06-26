@@ -12,13 +12,13 @@ python‑telegram‑bot 22 · openai ≥ 1.0
 * Reply‑клавиатура: админ — /img /reset /stats, остальные — /img /reset
 """
 from __future__ import annotations
-import base64, json, logging, os, shutil, sqlite3, uuid
-from datetime import datetime
+import base64, json, logging, os, shutil, uuid, subprocess
+import asyncio
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, List
 
 from dotenv import load_dotenv
-from pydub import AudioSegment
 from telegram import ReplyKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -30,6 +30,8 @@ from telegram.ext import (
 )
 import openai
 import html
+import atexit
+import aiosqlite
 
 # ──────────── CONFIG ────────────
 ROOT = Path(__file__).resolve().parent
@@ -47,11 +49,9 @@ MODEL_IMAGE = "dall-e-3"; IMG_PRICE = 0.04
 
 # ffmpeg/ffprobe — работает и в Windows, и в Linux
 FFMPEG = shutil.which("ffmpeg")
-if FFMPEG:
-    AudioSegment.converter = FFMPEG
-    FFPROBE = shutil.which("ffprobe")
-    if FFPROBE:
-        AudioSegment.ffprobe = FFPROBE
+FFPROBE = shutil.which("ffprobe")
+if not FFMPEG or not FFPROBE:
+    raise SystemExit("ffmpeg и ffprobe должны быть установлены и доступны в PATH")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("bot")
@@ -63,42 +63,54 @@ KB_ADMIN = ReplyKeyboardMarkup([["/img", "/reset", "/stats"]], resize_keyboard=T
 kb = lambda uid: KB_ADMIN if uid == ADMIN_ID else KB_USER
 
 # ──────────── DB ────────────
-DB = sqlite3.connect(ROOT / "history.db", check_same_thread=False)
-DB.executescript(
-    """
-CREATE TABLE IF NOT EXISTS messages (
-  user_id INTEGER, role TEXT, content TEXT, ts DATETIME DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS usage (
-  user_id INTEGER, event TEXT, prompt_t INTEGER, compl_t INTEGER,
-  seconds REAL, img_cnt INTEGER, cost_usd REAL, ts DATETIME DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS users (
-  user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT);
-"""
-)
+DB: aiosqlite.Connection = None
 
-def add_user(u):
-    DB.execute("INSERT OR REPLACE INTO users VALUES (?,?,?,?)", (u.id, u.username, u.first_name, u.last_name))
-    DB.commit()
+async def init_db():
+    global DB
+    DB = await aiosqlite.connect(ROOT / "history.db")
+    await DB.executescript("""
+    CREATE TABLE IF NOT EXISTS messages (
+      user_id INTEGER, role TEXT, content TEXT, ts DATETIME DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS usage (
+      user_id INTEGER, event TEXT, prompt_t INTEGER, compl_t INTEGER,
+      seconds REAL, img_cnt INTEGER, cost_usd REAL, ts DATETIME DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS users (
+      user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT);
+    """)
+    await DB.commit()
 
-def save_msg(uid: int, role: str, content: Any):
+@atexit.register
+def cleanup():
+    if DB is not None:
+        asyncio.get_event_loop().run_until_complete(DB.close())
+        log.info("Database connection closed.")
+
+async def add_user(u):
+    await DB.execute("INSERT OR REPLACE INTO users VALUES (?,?,?,?)", (u.id, u.username, u.first_name, u.last_name))
+    await DB.commit()
+
+async def save_msg(uid: int, role: str, content: Any):
     if isinstance(content, (dict, list)):
         content = json.dumps(content, ensure_ascii=False)
-    DB.execute("INSERT INTO messages VALUES (?,?,?,?)", (uid, role, content, datetime.utcnow()))
-    DB.commit()
+    await DB.execute("INSERT INTO messages VALUES (?,?,?,?)", 
+                    (uid, role, content, datetime.now(UTC).isoformat()))
+    await DB.commit()
 
-def save_usage(**kw):
-    DB.execute(
+async def save_usage(**kw):
+    await DB.execute(
         """INSERT INTO usage (user_id,event,prompt_t,compl_t,seconds,img_cnt,cost_usd)
            VALUES (:user_id,:event,:prompt_t,:compl_t,:seconds,:img_cnt,:cost)""",
         kw,
     )
-    DB.commit()
-
-def history(uid: int, limit: int = 20):
-    rows = DB.execute(
+    await DB.commit()
+        
+async def history(uid: int, limit: int = 20):
+    async with DB.execute(
         "SELECT role,content FROM messages WHERE user_id=? ORDER BY ts DESC LIMIT ?",
         (uid, limit),
-    ).fetchall()[::-1]
+    ) as cursor:
+        rows = await cursor.fetchall()
+    rows = rows[::-1]
     out = []
     for r, c in rows:
         try:
@@ -107,22 +119,46 @@ def history(uid: int, limit: int = 20):
             out.append({"role": r, "content": c})
     return out
 
+# ──────────── Вспомогательные функции для аудио ────────────
+def convert_ogg_to_wav(ogg_path: Path, wav_path: Path):
+    result = subprocess.run(
+        [FFMPEG, "-y", "-i", str(ogg_path), str(wav_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Ошибка конвертации ogg в wav: {result.stderr.decode()}")
+
+def get_audio_duration(wav_path: Path) -> float:
+    result = subprocess.run(
+        [FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(wav_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Ошибка определения длительности аудио: {result.stderr.decode()}")
+    return float(result.stdout.decode().strip())
+
 # ──────────── OpenAI ────────────
 async def chat_cost(uid: int, msgs):
-    resp = await client.chat.completions.create(model=MODEL_CHAT, messages=msgs)
-    u = resp.usage
-    cost = (u.prompt_tokens * COST_IN + u.completion_tokens * COST_OUT) / 1000
-    save_usage(user_id=uid, event="chat", prompt_t=u.prompt_tokens, compl_t=u.completion_tokens, seconds=None, img_cnt=None, cost=cost)
-    log.info("[COST] %s chat $%.4f", uid, cost)
-    return resp.choices[0].message.content.strip()
+    try:
+        resp = await client.chat.completions.create(model=MODEL_CHAT, messages=msgs)
+        u = resp.usage
+        cost = (u.prompt_tokens * COST_IN + u.completion_tokens * COST_OUT) / 1000
+        await save_usage(user_id=uid, event="chat", prompt_t=u.prompt_tokens, compl_t=u.completion_tokens, seconds=None, img_cnt=None, cost=cost)
+        log.info("[COST] %s chat $%.4f", uid, cost)
+        return resp.choices[0].message.content.strip()
+    except openai.APIError as e:
+        log.error(f"OpenAI API error: {e}")
+        return "Извините, произошла ошибка при обработке запроса."
+    except Exception as e:
+        log.error(f"Unexpected error in chat_cost: {e}")
+        return "Произошла внутренняя ошибка."
 
 async def transcribe_cost(uid: int, wav: Path):
-    audio = AudioSegment.from_file(wav)
-    sec = len(audio) / 1000
+    sec = get_audio_duration(wav)
     with open(wav, "rb") as f:
         tr = await client.audio.transcriptions.create(model=MODEL_TRANSCRIBE, file=f)
     cost = sec * WHISPER_RATE
-    save_usage(user_id=uid, event="voice", prompt_t=None, compl_t=None, seconds=sec, img_cnt=None, cost=cost)
+    await save_usage(user_id=uid, event="voice", prompt_t=None, compl_t=None, seconds=sec, img_cnt=None, cost=cost)
     log.info("[COST] %s voice $%.4f", uid, cost)
     return tr.text.strip()
 
@@ -131,31 +167,31 @@ async def generate_image(prompt: str):
 
 async def image_cost(uid: int, prompt: str):
     url = await generate_image(prompt)
-    save_usage(user_id=uid, event="img", prompt_t=None, compl_t=None, seconds=None, img_cnt=1, cost=IMG_PRICE)
+    await save_usage(user_id=uid, event="img", prompt_t=None, compl_t=None, seconds=None, img_cnt=1, cost=IMG_PRICE)
     log.info("[COST] %s img $%.2f", uid, IMG_PRICE)
     return url
 
 # ──────────── Handlers ────────────
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    add_user(update.effective_user)
+    await add_user(update.effective_user)
     await update.message.reply_text("Привет! Я мультимодальный бот.", reply_markup=kb(update.effective_user.id))
 
 async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    DB.execute("DELETE FROM messages WHERE user_id=?", (uid,))
-    DB.execute("DELETE FROM usage WHERE user_id=?", (uid,))
-    DB.commit()
+    await DB.execute("DELETE FROM messages WHERE user_id=?", (uid,))
+    await DB.execute("DELETE FROM usage WHERE user_id=?", (uid,))
+    await DB.commit()
     await update.message.reply_text("История очищена.", reply_markup=kb(uid))
 
 async def stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Команда доступна только администратору.")
         return
 
-    rows = DB.execute(
+    async with DB.execute(
         """SELECT u.username, COALESCE(u.first_name,''), COALESCE(u.last_name,''), SUM(cost_usd)
            FROM usage JOIN users u USING(user_id)
-          GROUP BY user_id ORDER BY 4 DESC""").fetchall()
+          GROUP BY user_id ORDER BY 4 DESC""") as cursor:
+        rows = await cursor.fetchall()
 
     total = sum(r[3] or 0 for r in rows)
     body = "\n".join(
@@ -167,26 +203,36 @@ async def stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Конвертируем голос в текст и пересылаем в GPT."""
-    u = update.effective_user; add_user(u)
+    log.info(f"Processing voice message from user {update.effective_user.id}")
+    u = update.effective_user; await add_user(u)
     v = update.message.voice
     work = TMP_DIR / f"v_{uuid.uuid4().hex}"; work.mkdir()
     ogg, wav = work / "v.oga", work / "v.wav"
+    text = ""
     try:
+        log.info(f"Downloading voice message from user {u.id}")
         await (await ctx.bot.get_file(v.file_id)).download_to_drive(str(ogg))
-        AudioSegment.from_file(ogg).export(wav, format="wav")
+        log.info(f"Converting voice message to WAV format for user {u.id}")
+        convert_ogg_to_wav(ogg, wav)
+        log.info(f"Transcribing voice message for user {u.id}")
         text = await transcribe_cost(u.id, wav)
+        log.info(f"Transcription completed for user {u.id}: {text}")
+    except Exception as e:
+        log.error(f"Error processing voice: {e}", exc_info=True)
+        await update.message.reply_text("Ошибка обработки голосового сообщения.")
+        return
     finally:
+        log.info(f"Cleaning up temporary files for user {u.id}")
         shutil.rmtree(work, ignore_errors=True)
 
-    save_msg(u.id, "user", text)
-    reply = await chat_cost(u.id, history(u.id))
-    save_msg(u.id, "assistant", reply)
+    await save_msg(u.id, "user", text)
+    reply = await chat_cost(u.id, await history(u.id))
+    await save_msg(u.id, "assistant", reply)
     await update.message.reply_text(reply, reply_markup=kb(u.id))
 
-# ---------- Photo ----------
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Фото → описание (Vision)"""
-    u = update.effective_user; add_user(u)
+    u = update.effective_user; await add_user(u)
     p = update.message.photo[-1]
     cap = (update.message.caption or "Опиши, что на фото").strip()
     work = TMP_DIR / f"p_{uuid.uuid4().hex}"; work.mkdir(); jpg = work / "img.jpg"
@@ -201,13 +247,12 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         {"type": "text", "text": cap}
     ]}]
     reply = await chat_cost(u.id, msg)
-    save_msg(u.id, "user", msg[0]["content"]); save_msg(u.id, "assistant", reply)
+    await save_msg(u.id, "user", msg[0]["content"]); await save_msg(u.id, "assistant", reply)
     await update.message.reply_text(reply, reply_markup=kb(u.id))
 
-# ---------- /img ----------
 async def cmd_img(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Генерируем изображение DALL·E 3"""
-    u = update.effective_user; add_user(u)
+    u = update.effective_user; await add_user(u)
     prompt = " ".join(ctx.args).strip()
     if not prompt:
         await update.message.reply_text("⚠️ Укажите промпт: /img <описание>", reply_markup=kb(u.id))
@@ -216,23 +261,32 @@ async def cmd_img(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     url = await image_cost(u.id, prompt)
     await update.message.reply_photo(photo=url, caption=prompt, reply_markup=kb(u.id))
 
-# ---------- Text ----------
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    u = update.effective_user; add_user(u)
+    u = update.effective_user; await add_user(u)
     text = update.message.text.strip()
-    save_msg(u.id, "user", text)
-    reply = await chat_cost(u.id, history(u.id))
-    save_msg(u.id, "assistant", reply)
+    await save_msg(u.id, "user", text)
+    reply = await chat_cost(u.id, await history(u.id))
+    await save_msg(u.id, "assistant", reply)
     await update.message.reply_text(reply, reply_markup=kb(u.id))
 
-# ---------- main ----------
+async def _notify_startup(app):
+    try:
+        await app.bot.send_message(chat_id=ADMIN_ID, text="🤖 Бот успешно запущен и готов к работе!")
+    except Exception as e:
+        log.warning("Не удалось отправить сообщение администратору: %s", e)
 
-def main() -> None:
+async def main() -> None:
     if not TG_TOKEN or not OPENAI_API_KEY:
         raise SystemExit("TELEGRAM_BOT_TOKEN или OPENAI_API_KEY не заданы")
 
     log.info("🛡️ ADMIN_ID: %s", ADMIN_ID)
-    app = ApplicationBuilder().token(TG_TOKEN).build()
+    await init_db()
+    app = (
+        ApplicationBuilder()
+        .token(TG_TOKEN)
+        .post_init(_notify_startup)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
@@ -244,10 +298,21 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     log.info("Бот запущен (polling)…")
-    app.run_polling(poll_interval=10)
-
+    await app.run_polling(poll_interval=10, drop_pending_updates=True)
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if sys.platform.startswith("win") and sys.version_info >= (3, 8):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    try:
+        import nest_asyncio
+        nest_asyncio.apply()
+    except ImportError:
+        pass  # Если nest_asyncio не установлен, просто продолжаем
 
-
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        # Только создаём задачу, не пытаемся run_until_complete!
+        loop.create_task(main())
+    else:
+        loop.run_until_complete(main())
