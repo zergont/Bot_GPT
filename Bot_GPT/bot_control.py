@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+п»ї#!/usr/bin/env python3
 import argparse
 import os
 import sys
@@ -28,69 +28,69 @@ def is_process_running(pid):
         return False
 
 def start_bot():
-    """Запуск бота"""
+    """Р—Р°РїСѓСЃРє Р±РѕС‚Р°"""
     pid = get_saved_pid()
     if pid and is_process_running(pid):
-        print("Бот уже запущен!")
+        print("Р‘РѕС‚ СѓР¶Рµ Р·Р°РїСѓС‰РµРЅ!")
         return
 
     proc = subprocess.Popen([sys.executable, "Bot_GPT.py"])
     save_pid(proc.pid)
-    print(f"Бот запущен (PID: {proc.pid})")
+    print(f"Р‘РѕС‚ Р·Р°РїСѓС‰РµРЅ (PID: {proc.pid})")
 
 def stop_bot():
-    """Остановка бота"""
+    """РћСЃС‚Р°РЅРѕРІРєР° Р±РѕС‚Р°"""
     pid = get_saved_pid()
     if not pid:
-        print("PID файл не найден")
+        print("PID С„Р°Р№Р» РЅРµ РЅР°Р№РґРµРЅ")
         return
 
     if not is_process_running(pid):
-        print("Бот не запущен")
+        print("Р‘РѕС‚ РЅРµ Р·Р°РїСѓС‰РµРЅ")
         get_pid_file().unlink(missing_ok=True)
         return
 
     try:
         os.kill(pid, signal.SIGTERM)
-        print("Бот остановлен")
+        print("Р‘РѕС‚ РѕСЃС‚Р°РЅРѕРІР»РµРЅ")
     except OSError as e:
-        print(f"Ошибка при остановке бота: {e}")
+        print(f"РћС€РёР±РєР° РїСЂРё РѕСЃС‚Р°РЅРѕРІРєРµ Р±РѕС‚Р°: {e}")
     finally:
         get_pid_file().unlink(missing_ok=True)
 
 def status_bot():
-    """Проверка статуса бота"""
+    """РџСЂРѕРІРµСЂРєР° СЃС‚Р°С‚СѓСЃР° Р±РѕС‚Р°"""
     pid = get_saved_pid()
     if not pid:
-        print("Бот не запущен")
+        print("Р‘РѕС‚ РЅРµ Р·Р°РїСѓС‰РµРЅ")
         return
 
     if is_process_running(pid):
-        print(f"Бот запущен (PID: {pid})")
+        print(f"Р‘РѕС‚ Р·Р°РїСѓС‰РµРЅ (PID: {pid})")
     else:
-        print("Бот не запущен (PID файл устарел)")
+        print("Р‘РѕС‚ РЅРµ Р·Р°РїСѓС‰РµРЅ (PID С„Р°Р№Р» СѓСЃС‚Р°СЂРµР»)")
         get_pid_file().unlink(missing_ok=True)
 
 def update_bot():
-    """Обновление бота из GitHub"""
+    """РћР±РЅРѕРІР»РµРЅРёРµ Р±РѕС‚Р° РёР· GitHub"""
     try:
         subprocess.run(["git", "fetch", "origin"], check=True)
         subprocess.run(["git", "reset", "--hard", "origin/main"], check=True)
         subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
-        print("Обновление успешно завершено")
-        # Перезапуск бота, если он был запущен
+        print("РћР±РЅРѕРІР»РµРЅРёРµ СѓСЃРїРµС€РЅРѕ Р·Р°РІРµСЂС€РµРЅРѕ")
+        # РџРµСЂРµР·Р°РїСѓСЃРє Р±РѕС‚Р°, РµСЃР»Рё РѕРЅ Р±С‹Р» Р·Р°РїСѓС‰РµРЅ
         pid = get_saved_pid()
         if pid and is_process_running(pid):
             stop_bot()
             start_bot()
-            print("Бот перезапущен")
+            print("Р‘РѕС‚ РїРµСЂРµР·Р°РїСѓС‰РµРЅ")
     except subprocess.CalledProcessError as e:
-        print(f"Ошибка при обновлении: {e}")
+        print(f"РћС€РёР±РєР° РїСЂРё РѕР±РЅРѕРІР»РµРЅРёРё: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Управление Telegram ботом')
+    parser = argparse.ArgumentParser(description='РЈРїСЂР°РІР»РµРЅРёРµ Telegram Р±РѕС‚РѕРј')
     parser.add_argument('command', choices=['start', 'stop', 'status', 'update'],
-                       help='Команда для управления ботом')
+                       help='РљРѕРјР°РЅРґР° РґР»СЏ СѓРїСЂР°РІР»РµРЅРёСЏ Р±РѕС‚РѕРј')
     args = parser.parse_args()
     commands = {
         'start': start_bot,
