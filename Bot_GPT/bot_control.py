@@ -75,7 +75,7 @@ def update_bot():
     """Обновление бота из GitHub"""
     try:
         subprocess.run(["git", "fetch", "origin"], check=True)
-        subprocess.run(["git", "reset", "--hard", "origin/main"], check=True)
+        subprocess.run(["git", "reset", "--hard", "origin/master"], check=True)
         subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
         print("Обновление успешно завершено")
         # Перезапуск бота, если он был запущен
