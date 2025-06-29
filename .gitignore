@@ -430,3 +430,4 @@ Thumbs.db
 # Если нужно оставить пример .env
 !.env.example
 /Bot_GPT/history.db
+/Bot_GPT/history.db
