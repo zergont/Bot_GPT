@@ -429,3 +429,4 @@ Thumbs.db
 # --- Исключения ---
 # Если нужно оставить пример .env
 !.env.example
+/Bot_GPT/history.db
